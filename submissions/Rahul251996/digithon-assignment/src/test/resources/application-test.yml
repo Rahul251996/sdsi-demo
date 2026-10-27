@@ -32,9 +32,11 @@ reservation:
     initial-delay-ms: 15000
 
 inventory:
+  seed:
+    enabled: false
   seed-file: classpath:test-inventory.json
 
 logging:
   level:
     root: WARN
-    com.digithon.assignment: DEBUG
+    com.digithon.assignment: INFO

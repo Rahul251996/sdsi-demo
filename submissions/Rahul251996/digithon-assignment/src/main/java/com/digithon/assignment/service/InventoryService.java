@@ -25,19 +25,22 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Core service implementing all inventory reservation operations with
- * MySQL pessimistic locking (SELECT ... FOR UPDATE) to prevent overselling.
+ * Core inventory reservation service.
  *
- * Lock ordering strategy:
- * 1. Lock the product row (serializes operations per SKU)
- * 2. Lock reservation rows as needed
- * 3. Process expired reservations under the same lock
- * 4. Validate stock and purchase limits
- * 5. Update counters and reservation state
- * 6. Commit
+ * Concurrency strategy: MySQL pessimistic row-level locking.
  *
- * This approach serializes concurrent operations on the same SKU,
- * preventing both overselling and purchase-limit bypass.
+ * Lock ordering (always the same to avoid deadlocks):
+ *   1. Product row (SELECT ... FOR UPDATE) — serializes by SKU
+ *   2. Reservation row (SELECT ... FOR UPDATE) — when needed
+ *
+ * The product lock serializes ALL operations on a given SKU. This correctly
+ * prevents both overselling (stock counter protection) and purchase-limit
+ * bypass (two threads for the same user+SKU are serialized; thread B sees
+ * thread A's committed reservation before its own limit check).
+ *
+ * Self-invocation note: Expiry work is delegated to {@link ExpiryService}
+ * (a separate Spring bean) so that @Transactional annotations on those
+ * methods are honoured through the AOP proxy.
  */
 @Service
 public class InventoryService {
@@ -47,17 +50,20 @@ public class InventoryService {
     private final ProductRepository productRepository;
     private final ReservationRepository reservationRepository;
     private final ReservationEventRepository eventRepository;
+    private final ExpiryService expiryService;
     private final ReservationProperties props;
     private final Clock clock;
 
     public InventoryService(ProductRepository productRepository,
                             ReservationRepository reservationRepository,
                             ReservationEventRepository eventRepository,
+                            ExpiryService expiryService,
                             ReservationProperties props,
                             Clock clock) {
         this.productRepository = productRepository;
         this.reservationRepository = reservationRepository;
         this.eventRepository = eventRepository;
+        this.expiryService = expiryService;
         this.props = props;
         this.clock = clock;
     }
@@ -75,22 +81,26 @@ public class InventoryService {
         int ttlSeconds = request.getTtlSeconds() != null
                 ? request.getTtlSeconds() : props.getDefaultTtlSeconds();
 
-        // Step 1: Lock the product row (serializes all operations on this SKU)
+        // Step 1: Lock the product row (serializes all ops on this SKU)
         Product product = productRepository.findBySkuForUpdate(request.getSku())
-                .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + request.getSku()));
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Product not found: " + request.getSku()));
 
-        // Step 2: Expire any stale reservations for this product under lock
-        expireProductReservationsUnderLock(product, now);
+        // Step 2: Expire stale reservations under the product lock (via ExpiryService method)
+        // This is an internal delegate call within the same transaction — no proxy issue.
+        expireStaleForProduct(product, now);
 
-        // Step 3: Check stock availability
+        // Step 3: Check stock
         if (product.getAvailableStock() < request.getQuantity()) {
             throw new InsufficientStockException(
                     "Requested quantity " + request.getQuantity()
                     + " exceeds available stock " + product.getAvailableStock());
         }
 
-        // Step 4: Check purchase limit (confirmed + active reserved for user/SKU)
-        // The product lock serializes this check, preventing concurrent bypass
+        // Step 4: Purchase limit check
+        // Because we hold the product lock, no other thread can create/confirm/cancel
+        // a reservation for this SKU until we commit. So the sum queries see a
+        // consistent snapshot of committed state.
         int confirmedQty = reservationRepository.sumConfirmedQuantity(
                 request.getUserId(), request.getSku());
         int activeReservedQty = reservationRepository.sumActiveReservedQuantity(
@@ -134,49 +144,49 @@ public class InventoryService {
     public ReservationResponse confirm(String reservationId) {
         Instant now = clock.instant();
 
-        // Step 1: Lock the reservation row
+        // Step 1: Lock the reservation
         Reservation reservation = reservationRepository.findByIdForUpdate(reservationId)
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Reservation not found: " + reservationId));
 
-        // Step 2: Validate state — idempotent for CONFIRMED
+        // Step 2: Idempotency — already confirmed
         if (reservation.getStatus() == ReservationStatus.CONFIRMED) {
             log.debug("Reservation {} already confirmed", reservationId);
             return ReservationResponse.from(reservation);
         }
 
+        // Step 3: Validate state
         if (reservation.getStatus() != ReservationStatus.RESERVED) {
             throw new InvalidStateTransitionException(
                     "Cannot confirm reservation " + reservationId
                     + " with status " + reservation.getStatus());
         }
 
-        // Step 3: Enforce expiry (now >= expiresAt means expired)
+        // Step 4: Expiry check — if expired, expire it and reject
         if (!reservation.getExpiresAt().isAfter(now)) {
-            // Transition to EXPIRED and reject
-            expireReservationUnderProductLock(reservation);
+            expireReservationUnderLock(reservation, now);
             throw new InvalidStateTransitionException(
                     "Reservation " + reservationId + " has expired");
         }
 
-        // Step 4: Lock the product row
+        // Step 5: Lock the product row
         Product product = productRepository.findBySkuForUpdate(reservation.getSku())
                 .orElseThrow(() -> new RuntimeException(
                         "Product not found: " + reservation.getSku()));
 
-        // Step 5: Expire any other stale reservations
-        expireProductReservationsExcluding(product, now, reservationId);
+        // Step 6: Expire any other stale reservations for this SKU
+        expireStaleForProductExcluding(product, now, reservationId);
 
-        // Step 6: Transfer reserved -> sold
+        // Step 7: Transfer reserved -> sold
         product.setReservedStock(product.getReservedStock() - reservation.getQuantity());
         product.setSoldStock(product.getSoldStock() + reservation.getQuantity());
         productRepository.save(product);
 
-        // Step 7: Update reservation status
+        // Step 8: Update status
         reservation.setStatus(ReservationStatus.CONFIRMED);
         reservationRepository.save(reservation);
 
-        // Step 8: Record event
+        // Step 9: Record event
         eventRepository.save(new ReservationEvent(reservationId, "CONFIRMED"));
 
         log.info("Reservation confirmed: id={}, qty={}", reservationId, reservation.getQuantity());
@@ -191,47 +201,48 @@ public class InventoryService {
     public ReservationResponse cancel(String reservationId) {
         Instant now = clock.instant();
 
-        // Step 1: Lock the reservation row
+        // Step 1: Lock the reservation
         Reservation reservation = reservationRepository.findByIdForUpdate(reservationId)
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Reservation not found: " + reservationId));
 
-        // Step 2: Validate state — idempotent for CANCELLED
+        // Step 2: Idempotency — already cancelled
         if (reservation.getStatus() == ReservationStatus.CANCELLED) {
             log.debug("Reservation {} already cancelled", reservationId);
             return ReservationResponse.from(reservation);
         }
 
+        // Step 3: Validate state
         if (reservation.getStatus() != ReservationStatus.RESERVED) {
             throw new InvalidStateTransitionException(
                     "Cannot cancel reservation " + reservationId
                     + " with status " + reservation.getStatus());
         }
 
-        // Step 3: If expired, transition to EXPIRED instead
+        // Step 4: If expired, expire it instead (stock release happens once)
         if (!reservation.getExpiresAt().isAfter(now)) {
-            expireReservationUnderProductLock(reservation);
+            expireReservationUnderLock(reservation, now);
             return ReservationResponse.from(reservation);
         }
 
-        // Step 4: Lock the product row
+        // Step 5: Lock the product row
         Product product = productRepository.findBySkuForUpdate(reservation.getSku())
                 .orElseThrow(() -> new RuntimeException(
                         "Product not found: " + reservation.getSku()));
 
-        // Step 5: Expire any other stale reservations
-        expireProductReservationsExcluding(product, now, reservationId);
+        // Step 6: Expire stale reservations for this SKU
+        expireStaleForProductExcluding(product, now, reservationId);
 
-        // Step 6: Release reserved -> available (NOT touching sold — can't cancel a sale)
+        // Step 7: Release reserved -> available
         product.setReservedStock(product.getReservedStock() - reservation.getQuantity());
         product.setAvailableStock(product.getAvailableStock() + reservation.getQuantity());
         productRepository.save(product);
 
-        // Step 7: Update reservation status
+        // Step 8: Update status
         reservation.setStatus(ReservationStatus.CANCELLED);
         reservationRepository.save(reservation);
 
-        // Step 8: Record event
+        // Step 9: Record event
         eventRepository.save(new ReservationEvent(reservationId, "CANCELLED"));
 
         log.info("Reservation cancelled: id={}, qty={}", reservationId, reservation.getQuantity());
@@ -239,7 +250,7 @@ public class InventoryService {
     }
 
     // =========================================================================
-    // M3: Get Reservation (with lazy expiry)
+    // M3: Get Reservation (with lazy expiry via ExpiryService proxy)
     // =========================================================================
 
     @Transactional(readOnly = true)
@@ -248,10 +259,11 @@ public class InventoryService {
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Reservation not found: " + reservationId));
 
-        // Lazy expiry: if the reservation is RESERVED but expired, expire it
+        // Lazy expiry: if expired, delegate to ExpiryService (separate bean, so
+        // @Transactional on expireById() works through the AOP proxy)
         if (reservation.getStatus() == ReservationStatus.RESERVED
                 && !reservation.getExpiresAt().isAfter(clock.instant())) {
-            expireReservationInNewTx(reservationId);
+            expiryService.expireById(reservationId);
             reservation = reservationRepository.findById(reservationId)
                     .orElseThrow(() -> new ResourceNotFoundException(
                             "Reservation not found: " + reservationId));
@@ -266,11 +278,11 @@ public class InventoryService {
 
     @Transactional(readOnly = true)
     public List<InventoryResponse> getAllInventory() {
-        Instant now = clock.instant();
         List<Product> products = productRepository.findAll();
 
         return products.stream().map(p -> {
-            expireForReport(p, now);
+            // Lazy-expire via ExpiryService (proxy-aware)
+            expiryService.expireForSku(p.getSku());
             Product refreshed = productRepository.findById(p.getSku()).orElse(p);
             return InventoryResponse.from(refreshed);
         }).collect(Collectors.toList());
@@ -278,17 +290,18 @@ public class InventoryService {
 
     @Transactional(readOnly = true)
     public InventoryResponse getInventoryBySku(String sku) {
-        Instant now = clock.instant();
         Product product = productRepository.findById(sku)
-                .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + sku));
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Product not found: " + sku));
 
-        expireForReport(product, now);
+        // Lazy-expire via ExpiryService (proxy-aware)
+        expiryService.expireForSku(sku);
         Product refreshed = productRepository.findById(sku).orElse(product);
         return InventoryResponse.from(refreshed);
     }
 
     // =========================================================================
-    // Validation
+    // Private helpers (internal, called within active transactions)
     // =========================================================================
 
     private void validateRequest(ReservationRequest request) {
@@ -306,104 +319,60 @@ public class InventoryService {
         }
     }
 
-    // =========================================================================
-    // Expiry Helpers
-    // =========================================================================
-
     /**
-     * Expire all expired RESERVED reservations for a product while holding its lock.
+     * Expire stale reservations for a product. Called while holding the product lock.
+     * Uses the package-private findExpiredForSku query, not findExpiredReservations
+     * (which would load all-SKU expired reservations into memory).
      */
-    private void expireProductReservationsUnderLock(Product product, Instant now) {
-        List<Reservation> expired = reservationRepository.findExpiredReservations(now);
-        for (Reservation r : expired) {
-            if (r.getSku().equals(product.getSku())
-                    && r.getStatus() == ReservationStatus.RESERVED) {
-                releaseStock(product, r, "EXPIRED");
+    private void expireStaleForProduct(Product product, Instant now) {
+        List<Reservation> candidates = expiryService.findExpiredForSku(product.getSku(), now);
+        for (Reservation r : candidates) {
+            if (r.getStatus() == ReservationStatus.RESERVED) {
+                releaseStock(product, r);
+            }
+        }
+    }
+
+    private void expireStaleForProductExcluding(Product product, Instant now, String excludeId) {
+        List<Reservation> candidates = expiryService.findExpiredForSkuExcluding(
+                product.getSku(), now, excludeId);
+        for (Reservation r : candidates) {
+            if (r.getStatus() == ReservationStatus.RESERVED) {
+                releaseStock(product, r);
             }
         }
     }
 
     /**
-     * Same as above but skips a specific reservation (being processed separately).
+     * Expire a single reservation, acquiring the product lock within the
+     * current transaction (valid since the product may already be locked).
      */
-    private void expireProductReservationsExcluding(Product product, Instant now,
-                                                     String excludeId) {
-        List<Reservation> expired = reservationRepository.findExpiredReservations(now);
-        for (Reservation r : expired) {
-            if (r.getSku().equals(product.getSku())
-                    && r.getStatus() == ReservationStatus.RESERVED
-                    && !r.getId().equals(excludeId)) {
-                releaseStock(product, r, "EXPIRED");
-            }
-        }
-    }
-
-    /**
-     * Expire a single reservation, acquiring the product lock first.
-     */
-    private void expireReservationUnderProductLock(Reservation r) {
+    private void expireReservationUnderLock(Reservation r, Instant now) {
         if (r.getStatus() != ReservationStatus.RESERVED) return;
+        if (r.getExpiresAt().isAfter(now)) return;
 
         Product product = productRepository.findBySkuForUpdate(r.getSku()).orElse(null);
         if (product == null) return;
 
-        releaseStock(product, r, "EXPIRED");
+        releaseStock(product, r);
     }
 
     /**
-     * Release reserved stock: reserved--, available++.
-     * Updates both the product and reservation in one step.
+     * Release stock: reserved--, available++.
+     * Must be called within an active transaction holding the product lock.
+     * Guard clause prevents double-release.
      */
-    private void releaseStock(Product product, Reservation r, String newStatus) {
+    private void releaseStock(Product product, Reservation r) {
         if (r.getStatus() != ReservationStatus.RESERVED) return;
 
         product.setReservedStock(product.getReservedStock() - r.getQuantity());
         product.setAvailableStock(product.getAvailableStock() + r.getQuantity());
-        r.setStatus(ReservationStatus.valueOf(newStatus));
+        r.setStatus(ReservationStatus.EXPIRED);
 
         reservationRepository.save(r);
         productRepository.save(product);
-        eventRepository.save(new ReservationEvent(r.getId(), newStatus));
+        eventRepository.save(new ReservationEvent(r.getId(), "EXPIRED"));
 
-        log.debug("Reservation {}: id={}, qty={}",
-                newStatus.toLowerCase(), r.getId(), r.getQuantity());
-    }
-
-    // =========================================================================
-    // New-transaction operations (for lazy expiry scenarios)
-    // =========================================================================
-
-    /**
-     * Expire a reservation by ID in a fresh transaction.
-     */
-    @Transactional(isolation = Isolation.READ_COMMITTED)
-    void expireReservationInNewTx(String reservationId) {
-        Instant now = clock.instant();
-        Reservation r = reservationRepository.findByIdForUpdate(reservationId).orElse(null);
-        if (r != null && r.getStatus() == ReservationStatus.RESERVED
-                && !r.getExpiresAt().isAfter(now)) {
-            Product product = productRepository.findBySkuForUpdate(r.getSku()).orElse(null);
-            if (product != null) {
-                releaseStock(product, r, "EXPIRED");
-            }
-        }
-    }
-
-    /**
-     * Expire stale reservations for a product in a fresh transaction (used by
-     * read-only reporting to ensure accurate counters).
-     */
-    @Transactional(isolation = Isolation.READ_COMMITTED)
-    void expireForReport(Product product, Instant now) {
-        Product locked = productRepository.findBySkuForUpdate(product.getSku()).orElse(null);
-        if (locked == null) return;
-
-        List<Reservation> expired = reservationRepository.findExpiredReservations(now);
-        for (Reservation r : expired) {
-            if (r.getSku().equals(locked.getSku())
-                    && r.getStatus() == ReservationStatus.RESERVED) {
-                releaseStock(locked, r, "EXPIRED");
-            }
-        }
+        log.debug("Reservation expired (inline): id={}, qty={}", r.getId(), r.getQuantity());
     }
 }

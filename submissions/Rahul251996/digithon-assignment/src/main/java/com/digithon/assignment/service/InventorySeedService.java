@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.io.Resource;
@@ -19,7 +20,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.*;
 
+/**
+ * Idempotent inventory seeding from a JSON file.
+ * Runs on ApplicationReadyEvent unless disabled via configuration.
+ *
+ * Controlled by: inventory.seed.enabled (default: true)
+ */
 @Service
+@ConditionalOnProperty(name = "inventory.seed.enabled", havingValue = "true", matchIfMissing = true)
 public class InventorySeedService {
 
     private static final Logger log = LoggerFactory.getLogger(InventorySeedService.class);
@@ -37,7 +45,7 @@ public class InventorySeedService {
 
     /**
      * Load initial inventory on application startup.
-     * Idempotent: only inserts products that don't already exist.
+     * Idempotent: only inserts products whose SKU does not already exist.
      */
     @EventListener(ApplicationReadyEvent.class)
     @Transactional
@@ -45,6 +53,7 @@ public class InventorySeedService {
         try {
             SeedData seedData = parseAndValidate();
             int inserted = 0;
+
             for (SeedProduct sp : seedData.getProducts()) {
                 if (!productRepository.existsById(sp.getSku())) {
                     Product product = new Product(
@@ -55,22 +64,20 @@ public class InventorySeedService {
                     );
                     productRepository.save(product);
                     inserted++;
-                    log.info("Seeded product: sku={}, name={}, totalStock={}, purchaseLimit={}",
+                    log.info("Seeded product: sku={}, name={}, totalStock={}, limit={}",
                             sp.getSku(), sp.getName(), sp.getTotalStock(), sp.getPurchaseLimit());
                 } else {
-                    log.debug("Product already exists, skipping: sku={}", sp.getSku());
+                    log.info("Skipping existing product: sku={}", sp.getSku());
                 }
             }
-            log.info("Inventory seeding complete. {} new products inserted.", inserted);
+
+            log.info("Seed complete: {} new products out of {} in seed file",
+                    inserted, seedData.getProducts().size());
         } catch (IOException e) {
-            log.error("Failed to read inventory seed file: {}", e.getMessage());
             throw new InvalidInputException("Failed to read inventory seed file: " + e.getMessage());
         }
     }
 
-    /**
-     * Parse and validate the seed JSON file.
-     */
     SeedData parseAndValidate() throws IOException {
         SeedData seedData;
         try (InputStream is = seedFile.getInputStream()) {
@@ -78,16 +85,13 @@ public class InventorySeedService {
         }
 
         if (seedData.getProducts() == null || seedData.getProducts().isEmpty()) {
-            throw new InvalidInputException("Seed file must contain a non-empty 'products' array");
+            throw new InvalidInputException("Seed file 'products' array is missing or empty");
         }
 
         validateProducts(seedData.getProducts());
         return seedData;
     }
 
-    /**
-     * Validate all seed products before importing any.
-     */
     private void validateProducts(List<SeedProduct> products) {
         Set<String> seenSkus = new HashSet<>();
 
@@ -95,22 +99,27 @@ public class InventorySeedService {
             SeedProduct sp = products.get(i);
             String prefix = "Product[" + i + "]";
 
+            // Missing/blank SKU
             if (sp.getSku() == null || sp.getSku().isBlank()) {
                 throw new InvalidInputException(prefix + ": sku is required and must not be blank");
             }
-            if (seenSkus.contains(sp.getSku())) {
+            // Duplicate SKU
+            if (!seenSkus.add(sp.getSku())) {
                 throw new InvalidInputException(prefix + ": duplicate sku '" + sp.getSku() + "'");
             }
-            seenSkus.add(sp.getSku());
-
+            // Missing/blank name
             if (sp.getName() == null || sp.getName().isBlank()) {
                 throw new InvalidInputException(prefix + ": name is required and must not be blank");
             }
+            // Negative stock
             if (sp.getTotalStock() < 0) {
-                throw new InvalidInputException(prefix + ": totalStock must be non-negative, got " + sp.getTotalStock());
+                throw new InvalidInputException(
+                        prefix + ": totalStock must be non-negative, got " + sp.getTotalStock());
             }
+            // Invalid purchase limit
             if (sp.getPurchaseLimit() <= 0) {
-                throw new InvalidInputException(prefix + ": purchaseLimit must be positive, got " + sp.getPurchaseLimit());
+                throw new InvalidInputException(
+                        prefix + ": purchaseLimit must be positive, got " + sp.getPurchaseLimit());
             }
         }
     }

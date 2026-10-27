@@ -1,8 +1,7 @@
 package com.digithon.assignment;
 
+import com.digithon.assignment.TestConfig.FixedClock;
 import com.digithon.assignment.domain.Product;
-import com.digithon.assignment.domain.Reservation;
-import com.digithon.assignment.domain.ReservationStatus;
 import com.digithon.assignment.repository.ProductRepository;
 import com.digithon.assignment.repository.ReservationEventRepository;
 import com.digithon.assignment.repository.ReservationRepository;
@@ -10,6 +9,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -18,9 +18,14 @@ import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
-import java.time.Instant;
-import java.util.UUID;
-
+/**
+ * Base class for integration tests using Testcontainers MySQL.
+ * Provides:
+ * - A real MySQL 8.0 database per test class
+ * - Controllable Clock via TestConfig.FixedClock
+ * - DB cleanup before/after each test
+ * - Inventory-consistency assertion helpers
+ */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
 @Testcontainers
@@ -28,7 +33,7 @@ import java.util.UUID;
 public abstract class BaseIntegrationTest {
 
     @Container
-    static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.0")
+    static final MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.0")
             .withDatabaseName("testdb")
             .withUsername("test")
             .withPassword("test");
@@ -42,6 +47,12 @@ public abstract class BaseIntegrationTest {
                 () -> "com.mysql.cj.jdbc.Driver");
     }
 
+    @LocalServerPort
+    protected int port;
+
+    @Autowired
+    protected FixedClock clock;
+
     @Autowired
     protected ProductRepository productRepository;
 
@@ -53,10 +64,12 @@ public abstract class BaseIntegrationTest {
 
     @BeforeEach
     void baseSetUp() {
-        // Clean and re-seed data for each test
         eventRepository.deleteAll();
         reservationRepository.deleteAll();
         productRepository.deleteAll();
+        productRepository.flush();
+        // Reset clock to fixed start time
+        clock.setInstant(TestConfig.START);
     }
 
     @AfterEach
@@ -66,34 +79,55 @@ public abstract class BaseIntegrationTest {
         productRepository.deleteAll();
     }
 
+    // =========================================================================
+    // Test fixture helpers
+    // =========================================================================
+
     protected void seedStandardProducts() {
         productRepository.save(new Product("A", "Product A", 5, 2));
         productRepository.save(new Product("B", "Product B", 1, 1));
         productRepository.save(new Product("C", "Product C", 0, 1));
+        productRepository.flush();
     }
 
-    protected Reservation createReservation(String userId, String sku, int qty,
-                                              Instant expiresAt) {
-        Reservation r = new Reservation(
-                UUID.randomUUID().toString(), userId, sku, qty,
-                ReservationStatus.RESERVED, expiresAt);
-        return reservationRepository.save(r);
+    protected void seedProduct(String sku, String name, int totalStock, int purchaseLimit) {
+        productRepository.save(new Product(sku, name, totalStock, purchaseLimit));
+        productRepository.flush();
     }
+
+    // =========================================================================
+    // Inventory consistency assertions
+    // =========================================================================
 
     protected void assertInventoryConsistent(Product p) {
-        int calc = p.getAvailableStock() + p.getReservedStock() + p.getSoldStock();
-        if (p.getTotalStock() != calc) {
+        int sum = p.getAvailableStock() + p.getReservedStock() + p.getSoldStock();
+        if (p.getTotalStock() != sum) {
             throw new AssertionError(String.format(
-                    "Inventory not consistent for %s: total=%d, available=%d, reserved=%d, sold=%d (sum=%d)",
+                    "Inventory not consistent for %s: total=%d, avail=%d, reserved=%d, sold=%d (sum=%d)",
                     p.getSku(), p.getTotalStock(), p.getAvailableStock(),
-                    p.getReservedStock(), p.getSoldStock(), calc));
+                    p.getReservedStock(), p.getSoldStock(), sum));
         }
-        if (p.getAvailableStock() < 0) throw new AssertionError("Available stock negative for " + p.getSku());
-        if (p.getReservedStock() < 0) throw new AssertionError("Reserved stock negative for " + p.getSku());
-        if (p.getSoldStock() < 0) throw new AssertionError("Sold stock negative for " + p.getSku());
+        if (p.getAvailableStock() < 0) {
+            throw new AssertionError("Negative available stock for " + p.getSku());
+        }
+        if (p.getReservedStock() < 0) {
+            throw new AssertionError("Negative reserved stock for " + p.getSku());
+        }
+        if (p.getSoldStock() < 0) {
+            throw new AssertionError("Negative sold stock for " + p.getSku());
+        }
     }
 
     protected void assertAllInventoryConsistent() {
         productRepository.findAll().forEach(this::assertInventoryConsistent);
+    }
+
+    protected Product getProduct(String sku) {
+        return productRepository.findById(sku)
+                .orElseThrow(() -> new AssertionError("Product not found: " + sku));
+    }
+
+    protected String baseUrl() {
+        return "http://localhost:" + port;
     }
 }

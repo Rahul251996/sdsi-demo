@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: inventory-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${DB_NAME:-inventory_db}
+      MYSQL_USER: ${DB_USERNAME:-inventory_app}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-change_me_locally}
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inventory-app
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-inventory_db}
+      DB_USERNAME: ${DB_USERNAME:-inventory_app}
+      DB_PASSWORD: ${DB_PASSWORD:-change_me_locally}
+      SERVER_PORT: "8080"
+    ports:
+      - "8080:8080"
+
+volumes:
+  mysql_data:
+    name: inventory_mysql_data
