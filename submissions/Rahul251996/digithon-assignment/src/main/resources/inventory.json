@@ -1,0 +1,22 @@
+{
+  "products": [
+    {
+      "sku": "A",
+      "name": "Product A",
+      "totalStock": 5,
+      "purchaseLimit": 2
+    },
+    {
+      "sku": "B",
+      "name": "Product B",
+      "totalStock": 1,
+      "purchaseLimit": 1
+    },
+    {
+      "sku": "C",
+      "name": "Product C",
+      "totalStock": 0,
+      "purchaseLimit": 1
+    }
+  ]
+}
