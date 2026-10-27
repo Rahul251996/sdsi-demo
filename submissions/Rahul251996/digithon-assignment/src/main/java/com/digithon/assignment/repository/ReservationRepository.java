@@ -77,4 +77,39 @@ public interface ReservationRepository extends JpaRepository<Reservation, String
     @Query("SELECT r FROM Reservation r WHERE r.userId = :userId AND r.sku = :sku")
     List<Reservation> findByUserIdAndSkuForUpdate(@Param("userId") String userId,
                                                     @Param("sku") String sku);
+
+    // =========================================================================
+    // Anti-hoarding queries
+    // =========================================================================
+
+    /**
+     * Count active (RESERVED, not yet expired) reservations for a user
+     * across ALL SKUs. Used to enforce maxActiveReservationsPerUser.
+     * Index: idx_reservations_user_sku_status partially covers this
+     * (user_id is leading column; status and expires_at filter in-memory).
+     */
+    @Query("SELECT COUNT(r) FROM Reservation r " +
+           "WHERE r.userId = :userId AND r.status = 'RESERVED' AND r.expiresAt > :now")
+    int countActiveReservationsByUser(@Param("userId") String userId,
+                                      @Param("now") Instant now);
+
+    /**
+     * Sum of total quantity in active (RESERVED, not expired) reservations
+     * for a user across ALL SKUs. Used for maxTotalReservedQuantityPerUser.
+     */
+    @Query("SELECT COALESCE(SUM(r.quantity), 0) FROM Reservation r " +
+           "WHERE r.userId = :userId AND r.status = 'RESERVED' AND r.expiresAt > :now")
+    int sumActiveReservedQuantityByUser(@Param("userId") String userId,
+                                        @Param("now") Instant now);
+
+    /**
+     * Find the most recent CANCELLED reservation for a user+SKU pair.
+     * Used for cooldown-after-cancel enforcement.
+     */
+    @Query("SELECT r FROM Reservation r " +
+           "WHERE r.userId = :userId AND r.sku = :sku AND r.status = 'CANCELLED' " +
+           "ORDER BY r.updatedAt DESC")
+    List<Reservation> findRecentCancelledByUserAndSku(@Param("userId") String userId,
+                                                       @Param("sku") String sku,
+                                                       org.springframework.data.domain.Pageable pageable);
 }

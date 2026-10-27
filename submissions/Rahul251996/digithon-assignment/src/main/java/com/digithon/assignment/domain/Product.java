@@ -29,7 +29,7 @@ public class Product {
     @Column(name = "purchase_limit", nullable = false)
     private int purchaseLimit;
 
-    @Column(name = "created_at", nullable = false)
+    @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
     @Column(name = "updated_at", nullable = false)
@@ -46,8 +46,6 @@ public class Product {
         this.reservedStock = 0;
         this.soldStock = 0;
         this.purchaseLimit = purchaseLimit;
-        this.createdAt = Instant.now();
-        this.updatedAt = Instant.now();
     }
 
     public boolean isConsistent() {
@@ -59,85 +57,33 @@ public class Product {
 
     // Getters and setters
 
-    public String getSku() {
-        return sku;
-    }
-
-    public void setSku(String sku) {
-        this.sku = sku;
-    }
-
-    public String getName() {
-        return name;
-    }
-
-    public void setName(String name) {
-        this.name = name;
-    }
-
-    public int getTotalStock() {
-        return totalStock;
-    }
-
-    public void setTotalStock(int totalStock) {
-        this.totalStock = totalStock;
-    }
-
-    public int getAvailableStock() {
-        return availableStock;
-    }
-
-    public void setAvailableStock(int availableStock) {
-        this.availableStock = availableStock;
-    }
-
-    public int getReservedStock() {
-        return reservedStock;
-    }
-
-    public void setReservedStock(int reservedStock) {
-        this.reservedStock = reservedStock;
-    }
-
-    public int getSoldStock() {
-        return soldStock;
-    }
-
-    public void setSoldStock(int soldStock) {
-        this.soldStock = soldStock;
-    }
-
-    public int getPurchaseLimit() {
-        return purchaseLimit;
-    }
-
-    public void setPurchaseLimit(int purchaseLimit) {
-        this.purchaseLimit = purchaseLimit;
-    }
-
-    public Instant getCreatedAt() {
-        return createdAt;
-    }
-
-    public void setCreatedAt(Instant createdAt) {
-        this.createdAt = createdAt;
-    }
-
-    public Instant getUpdatedAt() {
-        return updatedAt;
-    }
-
-    public void setUpdatedAt(Instant updatedAt) {
-        this.updatedAt = updatedAt;
-    }
+    public String getSku() { return sku; }
+    public void setSku(String sku) { this.sku = sku; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public int getTotalStock() { return totalStock; }
+    public void setTotalStock(int totalStock) { this.totalStock = totalStock; }
+    public int getAvailableStock() { return availableStock; }
+    public void setAvailableStock(int availableStock) { this.availableStock = availableStock; }
+    public int getReservedStock() { return reservedStock; }
+    public void setReservedStock(int reservedStock) { this.reservedStock = reservedStock; }
+    public int getSoldStock() { return soldStock; }
+    public void setSoldStock(int soldStock) { this.soldStock = soldStock; }
+    public int getPurchaseLimit() { return purchaseLimit; }
+    public void setPurchaseLimit(int purchaseLimit) { this.purchaseLimit = purchaseLimit; }
+    public Instant getCreatedAt() { return createdAt; }
+    public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+    public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
 
     @PrePersist
     protected void onCreate() {
+        Instant now = Instant.now();
         if (createdAt == null) {
-            createdAt = Instant.now();
+            createdAt = now;
         }
         if (updatedAt == null) {
-            updatedAt = Instant.now();
+            updatedAt = now;
         }
     }
 

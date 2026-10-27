@@ -4,6 +4,8 @@ import com.digithon.assignment.config.SchedulerConfig;
 import com.digithon.assignment.service.ExpiryService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -14,6 +16,9 @@ import org.springframework.stereotype.Component;
  * processed via ExpiryService.expireById(), which uses SELECT ... FOR UPDATE
  * on both the reservation and product rows. Only one worker succeeds; the
  * other sees the status already changed and returns without double-releasing.
+ *
+ * On startup (ApplicationReadyEvent), a single expiry pass runs immediately
+ * to clean up any reservations that expired while the app was down.
  */
 @Component
 public class ExpiryCleanupScheduler {
@@ -27,6 +32,25 @@ public class ExpiryCleanupScheduler {
                                    SchedulerConfig schedulerConfig) {
         this.expiryService = expiryService;
         this.schedulerConfig = schedulerConfig;
+    }
+
+    /**
+     * Run a full expiry pass on startup to release any reservations that
+     * expired while the application was stopped.
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void onStartup() {
+        if (!schedulerConfig.isExpiryCleanupEnabled()) {
+            return;
+        }
+        try {
+            int count = expiryService.expireBatch(schedulerConfig.getExpiryBatchSize());
+            if (count > 0) {
+                log.info("Startup cleanup: expired {} reservations", count);
+            }
+        } catch (Exception e) {
+            log.error("Startup cleanup failed: {}", e.getMessage(), e);
+        }
     }
 
     @Scheduled(fixedDelayString = "${reservation.expiry-cleanup.fixed-delay-ms:30000}",

@@ -27,7 +27,7 @@ public class Reservation {
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
 
-    @Column(name = "created_at", nullable = false)
+    @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
     @Column(name = "updated_at", nullable = false)
@@ -44,8 +44,6 @@ public class Reservation {
         this.quantity = quantity;
         this.status = status;
         this.expiresAt = expiresAt;
-        this.createdAt = Instant.now();
-        this.updatedAt = Instant.now();
     }
 
     public boolean isActive(Instant now) {
@@ -62,80 +60,28 @@ public class Reservation {
                 || status == ReservationStatus.EXPIRED;
     }
 
-    // Getters and setters
-
-    public String getId() {
-        return id;
-    }
-
-    public void setId(String id) {
-        this.id = id;
-    }
-
-    public String getUserId() {
-        return userId;
-    }
-
-    public void setUserId(String userId) {
-        this.userId = userId;
-    }
-
-    public String getSku() {
-        return sku;
-    }
-
-    public void setSku(String sku) {
-        this.sku = sku;
-    }
-
-    public int getQuantity() {
-        return quantity;
-    }
-
-    public void setQuantity(int quantity) {
-        this.quantity = quantity;
-    }
-
-    public ReservationStatus getStatus() {
-        return status;
-    }
-
-    public void setStatus(ReservationStatus status) {
-        this.status = status;
-    }
-
-    public Instant getExpiresAt() {
-        return expiresAt;
-    }
-
-    public void setExpiresAt(Instant expiresAt) {
-        this.expiresAt = expiresAt;
-    }
-
-    public Instant getCreatedAt() {
-        return createdAt;
-    }
-
-    public void setCreatedAt(Instant createdAt) {
-        this.createdAt = createdAt;
-    }
-
-    public Instant getUpdatedAt() {
-        return updatedAt;
-    }
-
-    public void setUpdatedAt(Instant updatedAt) {
-        this.updatedAt = updatedAt;
-    }
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    public String getSku() { return sku; }
+    public void setSku(String sku) { this.sku = sku; }
+    public int getQuantity() { return quantity; }
+    public void setQuantity(int quantity) { this.quantity = quantity; }
+    public ReservationStatus getStatus() { return status; }
+    public void setStatus(ReservationStatus status) { this.status = status; }
+    public Instant getExpiresAt() { return expiresAt; }
+    public void setExpiresAt(Instant expiresAt) { this.expiresAt = expiresAt; }
+    public Instant getCreatedAt() { return createdAt; }
+    public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+    public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
 
     @PrePersist
     protected void onCreate() {
-        if (createdAt == null) {
-            createdAt = Instant.now();
-        }
-        if (updatedAt == null) {
-            updatedAt = Instant.now();
-        }
+        Instant now = Instant.now();
+        if (createdAt == null) { createdAt = now; }
+        if (updatedAt == null) { updatedAt = now; }
     }
 
     @PreUpdate

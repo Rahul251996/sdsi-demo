@@ -5,7 +5,7 @@ import com.digithon.assignment.dto.SeedData;
 import com.digithon.assignment.dto.SeedProduct;
 import com.digithon.assignment.exception.InvalidInputException;
 import com.digithon.assignment.repository.ProductRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -78,7 +78,7 @@ public class InventorySeedService {
         }
     }
 
-    SeedData parseAndValidate() throws IOException {
+    public SeedData parseAndValidate() throws IOException {
         SeedData seedData;
         try (InputStream is = seedFile.getInputStream()) {
             seedData = objectMapper.readValue(is, SeedData.class);

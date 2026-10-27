@@ -1,36 +1,32 @@
 package com.digithon.assignment.api;
 
 import com.digithon.assignment.BaseIntegrationTest;
-import com.digithon.assignment.dto.ReservationResponse;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.*;
-
-import java.util.Map;
+import org.springframework.web.client.RestTemplate;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * API-level tests using TestRestTemplate.
+ * API-level tests using RestTemplate.
  * Tests HTTP status codes, response bodies, and validation error messages.
  */
 class ReservationApiTest extends BaseIntegrationTest {
 
     @Autowired
-    private TestRestTemplate restTemplate;
-
-    @Autowired
     private ObjectMapper objectMapper;
 
+    private RestTemplate restTemplate;
     private HttpHeaders jsonHeaders;
 
     @BeforeEach
     void setUp() {
         seedStandardProducts();
+        restTemplate = new RestTemplate();
         jsonHeaders = new HttpHeaders();
         jsonHeaders.setContentType(MediaType.APPLICATION_JSON);
     }

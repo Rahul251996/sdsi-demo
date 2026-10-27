@@ -1,6 +1,7 @@
 package com.digithon.assignment.integration;
 
 import com.digithon.assignment.BaseIntegrationTest;
+import com.digithon.assignment.TestConfig;
 import com.digithon.assignment.domain.Product;
 import com.digithon.assignment.domain.ReservationStatus;
 import com.digithon.assignment.dto.ReservationRequest;

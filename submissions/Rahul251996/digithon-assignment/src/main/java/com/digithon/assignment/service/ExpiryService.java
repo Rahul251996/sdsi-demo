@@ -9,8 +9,11 @@ import com.digithon.assignment.repository.ReservationEventRepository;
 import com.digithon.assignment.repository.ReservationRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
@@ -38,6 +41,13 @@ public class ExpiryService {
     private final ProductRepository productRepository;
     private final ReservationEventRepository eventRepository;
     private final Clock clock;
+
+    // Self-injection to get the AOP proxy so that self-calls
+    // (e.g. expireBatch -> expireById) go through the proxy and
+    // each call gets its own @Transactional boundary.
+    @Autowired
+    @Lazy
+    private ExpiryService self;
 
     public ExpiryService(ReservationRepository reservationRepository,
                          ProductRepository productRepository,
@@ -117,7 +127,7 @@ public class ExpiryService {
      *
      * @return true if the reservation was expired, false otherwise
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED)
+    @Transactional(isolation = Isolation.READ_COMMITTED, propagation = Propagation.REQUIRES_NEW)
     public boolean expireById(String reservationId) {
         Instant now = clock.instant();
 
@@ -151,7 +161,7 @@ public class ExpiryService {
      * Expire all stale reservations for a SKU in a new write transaction.
      * Used by reporting to ensure accurate inventory counters.
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED)
+    @Transactional(isolation = Isolation.READ_COMMITTED, propagation = Propagation.REQUIRES_NEW)
     public int expireForSku(String sku) {
         Instant now = clock.instant();
         Product product = productRepository.findBySkuForUpdate(sku).orElse(null);
@@ -165,18 +175,20 @@ public class ExpiryService {
 
     /**
      * Expire a batch of expired reservations. Used by the scheduled cleanup worker.
-     * Each reservation is processed atomically with its own product lock.
+     * Each reservation is processed in its own transaction (via self.proxy proxy)
+     * so that product locks are released between items.
      *
      * @return number of reservations expired
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED)
+    // readOnly outer tx for the find query; each self.expireById() is REQUIRES_NEW.
+    @Transactional(readOnly = true)
     public int expireBatch(int limit) {
         Instant now = clock.instant();
         List<Reservation> expired = findExpiredBatch(limit, now);
         int count = 0;
 
         for (Reservation r : expired) {
-            if (expireById(r.getId())) {
+            if (self.expireById(r.getId())) {
                 count++;
             }
         }
