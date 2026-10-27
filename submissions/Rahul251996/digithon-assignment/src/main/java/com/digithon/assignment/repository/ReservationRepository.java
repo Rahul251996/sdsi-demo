@@ -63,10 +63,11 @@ public interface ReservationRepository extends JpaRepository<Reservation, String
      * Find expired reservations across all SKUs, batched.
      * Uses index idx_reservations_status_expires_compound.
      */
-    @Query(value = "SELECT r FROM Reservation r " +
+    @Query("SELECT r FROM Reservation r " +
            "WHERE r.status = 'RESERVED' AND r.expiresAt <= :now " +
-           "ORDER BY r.expiresAt ASC LIMIT :limit")
-    List<Reservation> findExpiredWithLimit(@Param("limit") int limit, @Param("now") Instant now);
+           "ORDER BY r.expiresAt ASC")
+    List<Reservation> findExpiredWithLimit(@Param("now") Instant now,
+                                            org.springframework.data.domain.Pageable pageable);
 
     /**
      * Find all reservations for a user/SKU pair with pessimistic write lock.

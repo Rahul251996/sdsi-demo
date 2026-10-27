@@ -9,7 +9,6 @@ import com.digithon.assignment.repository.ReservationEventRepository;
 import com.digithon.assignment.repository.ReservationRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
@@ -73,7 +72,8 @@ public class ExpiryService {
      * Find all expired reservations (across all SKUs) with a limit for batch cleanup.
      */
     public List<Reservation> findExpiredBatch(int limit, Instant now) {
-        return reservationRepository.findExpiredWithLimit(limit, now);
+        return reservationRepository.findExpiredWithLimit(
+                now, org.springframework.data.domain.PageRequest.of(0, limit));
     }
 
     // =========================================================================
@@ -120,20 +120,29 @@ public class ExpiryService {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public boolean expireById(String reservationId) {
         Instant now = clock.instant();
-        Reservation r = reservationRepository.findByIdForUpdate(reservationId).orElse(null);
-        if (r == null || r.getStatus() != ReservationStatus.RESERVED) return false;
-        if (r.getExpiresAt().isAfter(now)) return false; // Not yet expired
 
-        Product product = productRepository.findBySkuForUpdate(r.getSku()).orElse(null);
+        // Read without lock first to discover the SKU (avoids deadlock).
+        // Then lock in the canonical order: Product first, Reservation second.
+        // This matches the lock order in InventoryService and avoids deadlocks.
+        Reservation preview = reservationRepository.findById(reservationId).orElse(null);
+        if (preview == null) return false;
+
+        // Step 1: Lock Product first (canonical lock order)
+        Product product = productRepository.findBySkuForUpdate(preview.getSku()).orElse(null);
         if (product == null) {
-            log.error("Product {} not found during expiry of reservation {}", r.getSku(), reservationId);
+            log.error("Product {} not found during expiry of {}", preview.getSku(), reservationId);
             return false;
         }
 
-        // Also expire any other stale reservations for this SKU while we have the lock
+        // Step 2: Lock Reservation second
+        Reservation r = reservationRepository.findByIdForUpdate(reservationId).orElse(null);
+        if (r == null || r.getStatus() != ReservationStatus.RESERVED) return false;
+        if (r.getExpiresAt().isAfter(now)) return false;
+
+        // Step 3: Expire other stale reservations for this SKU (skipping this one)
         expireUnderProductLock(product, now, reservationId);
 
-        // Expire the target reservation itself
+        // Step 4: Expire the target reservation
         releaseStock(product, r);
         return true;
     }
